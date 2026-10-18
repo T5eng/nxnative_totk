@@ -19,7 +19,9 @@ distributed here; you need your own legally obtained copy of the game and its up
 | `ios/` | The Xcode application (Sources, project.yml, generated-file tooling) |
 | `patches/0001-ios-port.patch` | Changes to MacNativeGames that are required on iOS (applied to a checkout of it) |
 | `docs/PORTING.md` | How the port works: architecture and the iOS-specific fixes |
-| `ios/README.md` | Full build and device-setup instructions |
+| `docs/MACOS.md` | Building/running the macOS version with the same patch (and its macOS 27 fixes) |
+| `docs/TECHNICAL.md` | Key technical points: module embedding, NVN→Metal replay, shader variants, pacing, address space, async replay |
+| `ios/README.md` | Full iOS build and device-setup instructions |
 
 ## How it works (short version)
 
@@ -32,6 +34,9 @@ distributed here; you need your own legally obtained copy of the game and its up
   touch controls, and an env-file based configuration channel.
 
 See `docs/PORTING.md` for the details.
+
+The same runtime patch also repairs the **macOS** build (macOS 27 guest-address-space and display-link changes); see
+`docs/MACOS.md`.
 
 ## Requirements
 
