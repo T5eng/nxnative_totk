@@ -1,0 +1,433 @@
+diff --git a/games/totk/runtime/autoload.c b/games/totk/runtime/autoload.c
+index 1e4bed3..f275d3b 100644
+--- a/games/totk/runtime/autoload.c
++++ b/games/totk/runtime/autoload.c
+@@ -25,7 +25,10 @@ static unsigned env_uint(const char *name, unsigned def, unsigned lo, unsigned h
+     if (end == e || *end || v < lo || v > hi) { fprintf(stderr, "[autoload] %s=%s: expected %u..%u\n", name, e, lo, hi); runtime_fail("invalid auto-load setting"); }
+     return (unsigned)v;
+ }
+-__attribute__((constructor)) static void autoload_configure(void) {
++/* The iOS shell loads its env file after the process constructors ran, so it calls this again once the file is read;
++   the constructor path covers the Mac (environment inherited from the launching process). */
++void runtime_autoload_start(void) {
++    if (atomic_load(&g_state) != AL_OFF) return;   /* already configured */
+     const char *e = getenv("TOTK_AUTOLOAD");
+     if (!e || !strcmp(e, "0")) return;
+     if (strcmp(e, "1")) runtime_fail("TOTK_AUTOLOAD takes 0 or 1");
+@@ -35,6 +38,7 @@ __attribute__((constructor)) static void autoload_configure(void) {
+     atomic_store(&g_state, AL_WAIT);
+     fprintf(stderr, "[autoload] on: the newest save is loaded once the game finds one (any key you press takes over)\n");
+ }
++__attribute__((constructor)) static void autoload_configure(void) { runtime_autoload_start(); }
+ 
+ static void stop(int from, const char *why) {
+     if (atomic_compare_exchange_strong(&g_state, &from, AL_DONE)) fprintf(stderr, "[autoload] %s\n", why);
+diff --git a/games/totk/runtime/frontend.m b/games/totk/runtime/frontend.m
+index a78b474..3c72afc 100644
+--- a/games/totk/runtime/frontend.m
++++ b/games/totk/runtime/frontend.m
+@@ -5,6 +5,7 @@
+ #import <CoreVideo/CoreVideo.h>
+ #include <stdatomic.h>
+ #include <math.h>
++#include <time.h>   /* nanosleep: macOS 27 has no CVDisplayLink, the 60 Hz fallback below */
+ #include "runtime.h"
+ #include "game_version.h"
+ static NSWindow *window;
+@@ -68,6 +69,14 @@ void runtime_warm_done(void){
+ /* Keep the guest active when the macOS window loses key status. Native input is still cleared
+    in windowDidResignKey so a held key cannot remain stuck while another app has focus. */
+ int runtime_front_focus(void){return 1;}
++/* macOS 27 (26A428) no longer provides a working CVDisplayLink (CVDisplayLinkCreateWithActiveCGDisplays fails), so the
++   VSync events are signalled from a 60 Hz timer thread instead. The game only needs the display event to fire at the
++   refresh rate; the delay to the next real vsync is a fraction of a frame. */
++static void *vsync_timer_thread(void *arg){
++ (void)arg; struct timespec ts={0,1000000000L/60};
++ for(;;){ nanosleep(&ts,NULL); pthread_mutex_lock(&vsyncLock); for(unsigned i=0;i<vsyncCount;i++)hle_signal_system_event(vsyncEvents[i]); pthread_mutex_unlock(&vsyncLock); }
++ return NULL;
++}
+ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,const CVTimeStamp *output,CVOptionFlags flags,CVOptionFlags *out,void *ctx){
+  (void)link;(void)now;(void)output;(void)flags;(void)out;(void)ctx;
+  pthread_mutex_lock(&vsyncLock);for(unsigned i=0;i<vsyncCount;i++)hle_signal_system_event(vsyncEvents[i]);pthread_mutex_unlock(&vsyncLock);return kCVReturnSuccess;
+@@ -176,7 +185,11 @@ void runtime_front_run(void(*callback)(void)){
+   if(assume_focus()){[window orderFrontRegardless];}else{[window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];}   /* in front of other apps' windows, keyboard left alone */
+   dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),^{note_occlusion(" 3 s after opening");});
+   atomic_store(&focused,1);
+-  if(CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)||CVDisplayLinkSetOutputCallback(displayLink,vsync_callback,NULL)||CVDisplayLinkStart(displayLink))runtime_fail("native display link initialization");
++  if(CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)||CVDisplayLinkSetOutputCallback(displayLink,vsync_callback,NULL)||CVDisplayLinkStart(displayLink)){
++   /* macOS 27: CVDisplayLink is gone; keep the guest clock on a 60 Hz timer instead of aborting the run. */
++   pthread_t t; if(pthread_create(&t,NULL,vsync_timer_thread,NULL))runtime_fail("native display link initialization"); pthread_detach(t);
++   fprintf(stderr,"[totk] CVDisplayLink unavailable; signalled VSync from a 60 Hz timer thread\n");
++  }
+   pthread_t guest;pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,8*1024*1024);int err=pthread_create(&guest,&attr,guest_main,(void *)callback);pthread_attr_destroy(&attr);if(err)runtime_fail("native game thread creation");
+   [NSApp run];runtime_fail("native event loop returned unexpectedly");
+  }
+diff --git a/games/totk/runtime/game_patches_v143.c b/games/totk/runtime/game_patches_v143.c
+index 150da45..7616e63 100644
+--- a/games/totk/runtime/game_patches_v143.c
++++ b/games/totk/runtime/game_patches_v143.c
+@@ -8,6 +8,14 @@
+ #include <stdatomic.h>
+ #include <math.h>
+ 
++/* iOS cannot write code pages: TOTK_EXPORT_IOS ran these patches on the Mac and the loader checks the exported words.
++   In that mode the sites are verified against the patched encoding and nothing is written. */
++#if TARGET_OS_IPHONE
++#define CODE_PATCHED_AT_BUILD 1
++#else
++#define CODE_PATCHED_AT_BUILD 0
++#endif
++
+ typedef struct { uint64_t off; uint32_t original, replacement; } Patch;
+ static const Patch fps60[] = {
+     {0x2db204, 0x6b08015f, 0x7100055f},
+@@ -67,11 +75,6 @@ static void patch_realtime(Module *m){
+     const Patch guards[]={
+         {0x3e5658,0x1e210808,0},{0x2daa54,0xbd425260,0},{0x2daa58,0x52a84e08,0},
+         {0x2daa6c,0x5e21d800,0},{0x2daa70,0x1e201820,0},{0x2daa74,0x1e2c1001,0},{0x2daa78,0x1e210800,0}};
+-    for(unsigned i=0;i<sizeof guards/sizeof *guards;i++){
+-        uint32_t word;memcpy(&word,m->base+guards[i].off,4);
+-        if(word!=guards[i].original)runtime_fail("1.4.3 real-time original instruction mismatch");
+-    }
+-    for(unsigned i=0;i<16;i++)if(m->base[stub+i])runtime_fail("1.4.3 frame-step veneer padding not empty");
+     /* Replace the nominal 60/FPS interval BEFORE the original producer applies
+      * its 0.5/1.0 selector (sys+0x1da bit 0). Both FrameRateMgr call sites use
+      * this s8 value. Hooking the callee entry instead would discard that scale
+@@ -80,9 +83,22 @@ static void patch_realtime(Module *m){
+      * x9 contains live task flags here: use x8, which the next ldxr overwrites.
+      * s0 is dead until the call sites copy s8 into it again. */
+     uint32_t veneer[]={adrp(8,(uintptr_t)m->base+stub,(uintptr_t)m->base+data),0xbd400900,0x1e210808,branch(stub+12,0x3e565c)};
+-    memcpy(m->base+stub,veneer,sizeof veneer);
+     uint32_t words[]={branch(0x3e5658,stub),adrp(9,(uintptr_t)m->base+0x2daa54,(uintptr_t)m->base+data),0xbd400120,0xd503201f,0xd503201f,0xd503201f,0xd503201f};
++#if CODE_PATCHED_AT_BUILD
++    for(unsigned i=0;i<sizeof guards/sizeof *guards;i++){
++        uint32_t word;memcpy(&word,m->base+guards[i].off,4);
++        if(word!=words[i])runtime_fail("1.4.3 real-time patched instruction mismatch (build-time export)");
++    }
++    { const uint8_t *v=(const uint8_t *)veneer; for(unsigned i=0;i<sizeof veneer;i++)if(m->base[stub+i]!=v[i])runtime_fail("1.4.3 frame-step veneer mismatch (build-time export)"); }
++#else
++    for(unsigned i=0;i<sizeof guards/sizeof *guards;i++){
++        uint32_t word;memcpy(&word,m->base+guards[i].off,4);
++        if(word!=guards[i].original)runtime_fail("1.4.3 real-time original instruction mismatch");
++    }
++    for(unsigned i=0;i<16;i++)if(m->base[stub+i])runtime_fail("1.4.3 frame-step veneer padding not empty");
++    memcpy(m->base+stub,veneer,sizeof veneer);
+     for(unsigned i=0;i<sizeof guards/sizeof *guards;i++)memcpy(m->base+guards[i].off,words+i,4);
++#endif
+     frame_step_data=(_Atomic uint64_t *)(void *)(m->base+data);
+     frame_interval_data=(_Atomic uint32_t *)(void *)(m->base+data+8);frame_step_store(1.0f/60.0f);
+     fprintf(stderr,"[totk] 1.4.3 real-time frame step: 7 guarded sites, producer veneer +%#llx; original half-step selector and ratio/inverse/seconds/FPS calculations retained\n",(unsigned long long)stub);
+@@ -101,10 +117,16 @@ void runtime_game_patches(Module *m) {
+         uint32_t word;
+         if (fps60[i].off + 4 > m->text_end) runtime_fail("1.4.3 FPS patch outside text");
+         memcpy(&word, m->base + fps60[i].off, 4);
++#if CODE_PATCHED_AT_BUILD
++        if (word != fps60[i].replacement) runtime_fail("1.4.3 FPS patch patched instruction mismatch (build-time export)");
++#else
+         if (word != fps60[i].original) runtime_fail("1.4.3 FPS patch original instruction mismatch");
++#endif
+     }
++#if !CODE_PATCHED_AT_BUILD
+     for (unsigned i = 0; i < sizeof fps60 / sizeof *fps60; i++)
+         memcpy(m->base + fps60[i].off, &fps60[i].replacement, 4);
++#endif
+     fprintf(stderr, "[totk] 1.4.3 60 FPS: seven verified controller instructions; original game frame-time calculation\n");
+ }
+ 
+@@ -142,6 +164,22 @@ uint64_t runtime_output_res_extra_bytes(void){
+     uint64_t kib=(uint64_t)ceil(113664.0*ratio/1024.0)*1024-113664;return kib<<10;
+ }
+ static void patch_output_res(Module *m){
++#if CODE_PATCHED_AT_BUILD
++    /* The export embedded this patch's instruction words (2K swapchain immediates + the display-config veneer at
++       stub = page_up(file_size)+32) but the data page those words read was left zero. The game then publishes canvas
++       size 0 and every draw gets an empty scissor (observed as scissor-empty on all draws, black screen). Write the
++       classic 1080p canvas state here, exactly what the Mac patch starts with in auto mode. */
++    unsigned w2,h2;int on2=runtime_output_res(&w2,&h2);
++    uint64_t dpage=(m->file_size+0x3fff)&~0x3fffULL;
++    if(dpage+0x4000!=m->size){fprintf(stderr,"[totk] 1.4.3 output: iOS data page missing (size %#llx, file %#llx)\n",
++        (unsigned long long)m->size,(unsigned long long)m->file_size);return;}
++    uint8_t *page=m->base+dpage;
++    *(uint64_t *)(void *)(page+32)=pack_size(1920,1080);   /* the output size the game reads (canvas) */
++    *(uint64_t *)(void *)(page+40)=0;                      /* renderer object, published by the game later */
++    fprintf(stderr,"[totk] 1.4.3 output: iOS data page initialised (canvas 1920x1080%s)\n",
++        on2?" (TOTK_OUTPUT_RES requests a larger swapchain; key 3 switches once the game has laid out)":"");
++    (void)w2;(void)h2;return;
++#endif
+     unsigned w,h;if(!runtime_output_res(&w,&h))return;
+     uint64_t data=(m->file_size+0x3fff)&~0x3fffULL,stub=((m->file_size+15)&~15ULL)+32;
+     if(data+0x4000!=m->size||stub+28>data)runtime_fail("1.4.3 output patch layout");
+diff --git a/games/totk/runtime/input.c b/games/totk/runtime/input.c
+index bb94b0d..c29fd8c 100644
+--- a/games/totk/runtime/input.c
++++ b/games/totk/runtime/input.c
+@@ -4,6 +4,8 @@
+ #include "world_survey.h"
+ #include <stdbool.h>
+ #include <stdio.h>
++#include <sys/stat.h>
++#include <dirent.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <stdatomic.h>
+@@ -129,9 +131,17 @@ extern void dm_gfx_shot_at(long frames, const char *path);
+ extern void runtime_front_request_close(void);
+ static void *input_file(void *arg) {
+     FILE *f = fopen((const char *)arg, "r"); if (!f) runtime_fail("cannot open TOTK_INPUT_FILE");
++    /* TOTK_INPUT_REOPEN=1 (iOS, remote diagnostics): the phone's file is replaced over AFC from the Mac, so the old FILE*
++       stays at EOF on the old inode. When the path now names a different file or a different size, reopen it and start over. */
++    int reopen = getenv("TOTK_INPUT_REOPEN") && *getenv("TOTK_INPUT_REOPEN");
++    struct stat st; off_t last_size = stat((const char *)arg, &st) == 0 ? st.st_size : -1; ino_t last_ino = stat((const char *)arg, &st) == 0 ? st.st_ino : 0;
+     char line[1200];
+     for (;;) {
+-        if (!fgets(line, sizeof line, f)) { if (ferror(f)) runtime_fail("diagnostic input read"); clearerr(f); usleep(100000); continue; }
++        if (!fgets(line, sizeof line, f)) { if (ferror(f)) runtime_fail("diagnostic input read"); clearerr(f);
++            if (reopen) { struct stat now; if (stat((const char *)arg, &now) == 0 && (now.st_size != last_size || now.st_ino != last_ino)) {
++                    fclose(f); f = fopen((const char *)arg, "r"); if (!f) runtime_fail("cannot reopen TOTK_INPUT_FILE");
++                    last_size = now.st_size; last_ino = now.st_ino; continue; } }
++            usleep(100000); continue; }
+         if (runtime_survey_command(line)) continue;
+         unsigned code, ms; int used = 0;
+         if (sscanf(line, "down %u %n", &code, &used) == 1 && used && !line[used] && code < 128) {
+@@ -186,7 +196,52 @@ static void *input_file(void *arg) {
+     }
+     fclose(f); return NULL;
+ }
+-__attribute__((constructor)) static void input_file_start(void) {
++/* Remote command queue (iOS): Documents/cmds/*.txt, each holding one diagnostic command line; the shell starts this reader
++   after its env file is loaded, and the Mac side only has to drop a new file into the directory (AFC cannot append to an
++   open file reliably). Files are executed in name order and removed. */
++extern void dm_gfx_shot_at(long frames, const char *path);
++extern void dm_gfx_window_shot(const char *path);
++extern void dm_gfx_passdump_next(long n);
++static void cmd_exec(char *line) {
++    size_t n = strlen(line); while (n && (line[n-1] == '\n' || line[n-1] == '\r' || line[n-1] == ' ')) line[--n] = 0;
++    if (!n) return;
++    if (runtime_survey_command(line)) return;
++    unsigned ms; int used = 0;
++    if (!strcmp(line, "threads")) runtime_dump_threads();
++    else if (!strncmp(line, "wshot ", 6)) dm_gfx_window_shot(line + 6);
++    else if (!strncmp(line, "shot ", 5)) dm_gfx_shot_at(2, line + 5);
++    else if (sscanf(line, "passdump %u %n", &ms, &used) == 1 && used && !line[used]) dm_gfx_passdump_next((long)ms);
++    else if (sscanf(line, "hletrace %u %n", &ms, &used) == 1 && used && !line[used] && ms <= 2) runtime_hle_trace_set((int)ms);
++    else if (!strncmp(line, "framestep ", 10)) runtime_frame_step_pin(strtod(line + 10, NULL));
++    else fprintf(stderr, "[totk-cmd] unknown command: %s\n", line);
++    fprintf(stderr, "[totk-cmd] done: %s\n", line);
++}
++static void *cmd_dir(void *arg) {
++    const char *dir = (const char *)arg;
++    for (;;) {
++        usleep(150000);
++        DIR *d = opendir(dir); if (!d) continue;
++        char names[32][64]; int nn = 0;
++        for (struct dirent *e; nn < 32 && (e = readdir(d)); ) if (e->d_name[0] != '.' && strstr(e->d_name, ".txt")) { strncpy(names[nn], e->d_name, 63); names[nn][63] = 0; nn++; }
++        closedir(d);
++        qsort(names, nn, sizeof names[0], (int (*)(const void *, const void *))strcmp);
++        for (int i = 0; i < nn; i++) {
++            char path[1200]; snprintf(path, sizeof path, "%s/%s", dir, names[i]);
++            FILE *f = fopen(path, "r"); if (!f) continue;
++            char line[1200];
++            while (fgets(line, sizeof line, f)) cmd_exec(line);
++            fclose(f); unlink(path);
++        }
++    }
++    return NULL;
++}
++void runtime_cmd_dir_start(void) {
++    if (getenv("TOTK_CMD_DIR") && *getenv("TOTK_CMD_DIR")) { pthread_t t; if (!pthread_create(&t, NULL, cmd_dir, (void *)getenv("TOTK_CMD_DIR"))) pthread_detach(t); }
++}
++/* The iOS shell loads its env file after the process constructors have run, so TOTK_INPUT_FILE is started explicitly
++   from there as well: runtime_input_file_start() is the same entry the constructor uses. */
++void runtime_input_file_start(void) {
+     const char *e = getenv("TOTK_INPUT_FILE"); if (!e || !*e) return;
+     pthread_t t; if (pthread_create(&t, NULL, input_file, (void *)e)) runtime_fail("diagnostic input thread"); pthread_detach(t);
+ }
++__attribute__((constructor)) static void input_file_start(void) { runtime_input_file_start(); }
+diff --git a/games/totk/runtime/loader.c b/games/totk/runtime/loader.c
+index a6e45e0..163920b 100644
+--- a/games/totk/runtime/loader.c
++++ b/games/totk/runtime/loader.c
+@@ -202,7 +202,12 @@ static void export_ios_text(const char *rewritten,const char *out) {
+   unsigned diff=0;for(size_t k=0;k<n;k+=4)if(memcmp(orig+k,m->base+k,4))diff++;free(orig);
+   need(snprintf(path,sizeof path,"%s/%s.x0.bin",out,m->name)<(int)sizeof path,"export path");
+   f=fopen(path,"wb");need(f&&fwrite(m->base,1,n,f)==n&&fclose(f)==0,"write exported text");
+-  printf("%s text_bytes=%zu patched_words=%u\n",m->name,n,diff);}
++  /* The game patches also write a veneer into the patch area after file_size (real-time frame step / output resolution).
++     Embed it too: the phone cannot write the r-x patch area at run time. */
++  size_t np=page_up(m->file_size)-m->patch_off;
++  need(snprintf(path,sizeof path,"%s/%s.x1.bin",out,m->name)<(int)sizeof path,"export patch path");
++  f=fopen(path,"wb");need(f&&fwrite(m->base+m->patch_off,1,np,f)==np&&fclose(f)==0,"write exported patch area");
++  printf("%s text_bytes=%zu patch_bytes=%zu patched_words=%u\n",m->name,n,np,diff);}
+ }
+ #endif
+ static void relocate(Module *m) {
+diff --git a/games/totk/runtime/runtime.h b/games/totk/runtime/runtime.h
+index 4069a16..82df727 100644
+--- a/games/totk/runtime/runtime.h
++++ b/games/totk/runtime/runtime.h
+@@ -66,6 +66,10 @@ void runtime_fs_probe(void);
+ void *runtime_observer(const char *name);
+ 
+ void runtime_startup_checkpoint(uintptr_t caller);
++void runtime_reserve_guest_memory(void);
++void runtime_input_file_start(void);
++void runtime_cmd_dir_start(void);
++void runtime_autoload_start(void);   /* runtime/autoload.c: arm TOTK_AUTOLOAD after the iOS shell read its env file */   /* runtime/input.c: Documents/cmds/*.txt remote diagnostics queue (iOS) */   /* runtime/input.c: TOTK_INPUT_FILE command reader (iOS shell starts it after loading env) */   /* loader.c/services.c: reserve stack/heap/alias before UIKit maps its own regions (iOS) */
+ 
+ uint64_t runtime_now_ns(void);
+ uint32_t svc_thread_main_init(void);
+diff --git a/games/totk/runtime/services.c b/games/totk/runtime/services.c
+index f82c93e..a96d844 100644
+--- a/games/totk/runtime/services.c
++++ b/games/totk/runtime/services.c
+@@ -28,13 +28,21 @@
+ #else
+ #define ALIAS_DEFAULT_GIB 64
+ #endif
+-static uint64_t alias_size(void){static uint64_t v;if(!v){const char *e=getenv("TOTK_ALIAS_GIB");uint64_t g=e?strtoull(e,NULL,0):ALIAS_DEFAULT_GIB;if(g<1||g>64)runtime_fail("TOTK_ALIAS_GIB must be 1..64");v=g<<30;}return v;}
++static uint64_t alias_actual;   /* size actually reserved (the macOS 27 / iOS fallbacks may choose a smaller one) */
++static uint64_t alias_size(void){if(alias_actual)return alias_actual;static uint64_t v;if(!v){const char *e=getenv("TOTK_ALIAS_GIB");uint64_t g=e?strtoull(e,NULL,0):ALIAS_DEFAULT_GIB;if(g<1||g>64)runtime_fail("TOTK_ALIAS_GIB must be 1..64");v=g<<30;}return v;}
+ #define ALIAS_SIZE alias_size()
+ #define LOW_SEARCH_FROM 0x300000000ULL
+ #define LOW_SIZE (6ULL<<30)
+ #define STACK_OFF 0x10000000ULL
+ #define STACK_SIZE 0x10000000ULL
+ #define HEAP_OFF (STACK_OFF+STACK_SIZE+0x10000000ULL)
++/* iOS 27 leaves only ~6 GiB of free virtual address space above 0x7000_0000_0000 (a GPU/IOMMU reservation starts at
++   ~0x7180_0000_0000). Split it 3 GiB stack/heap + 3 GiB alias: the heap region (3 GiB - HEAP_OFF) still covers the
++   game's ~2.1 GiB heap when TOTK_APP_POOL is the retail 3.2 GiB. */
++#if TARGET_OS_IPHONE
++#undef LOW_SIZE
++#define LOW_SIZE (3ULL<<30)
++#endif
+ static uint8_t *alias_space,*low_space,*heap;
+ static size_t heap_size;
+ static unsigned char alias_pages[ALIAS_SIZE_MAX/4096];
+@@ -59,27 +67,60 @@ static uint64_t app_pool(void){static uint64_t v;if(!v){const char *e=getenv("TO
+ #else
+ #define ASLR_SIZE (GUEST_ADDRESS_LIMIT-(uintptr_t)low_space)
+ #endif
++static _Atomic int g_last_kern;
++static int kern_last_error(void){return atomic_load(&g_last_kern);}
+ static uint8_t *reserve_fixed(uint64_t at,uint64_t size){
+  mach_vm_address_t a=at;   /* FIXED without OVERWRITE: fails instead of replacing an existing mapping */
+- return mach_vm_map(mach_task_self(),&a,size,0,VM_FLAGS_FIXED,MEMORY_OBJECT_NULL,0,FALSE,VM_PROT_NONE,VM_PROT_ALL,VM_INHERIT_DEFAULT)==KERN_SUCCESS?(uint8_t *)(uintptr_t)a:NULL;
++ kern_return_t kr=mach_vm_map(mach_task_self(),&a,size,0,VM_FLAGS_FIXED,MEMORY_OBJECT_NULL,0,FALSE,VM_PROT_NONE,VM_PROT_ALL,VM_INHERIT_DEFAULT);
++ if(kr!=KERN_SUCCESS){atomic_store(&g_last_kern,kr);return NULL;}
++ return (uint8_t *)(uintptr_t)a;
++}
++/* iOS 27: fixed mappings above the low VA window are rejected, so the guest window is taken with ANYWHERE reservations and
++   checked against the 39-bit guest limit HIPC needs. */
++static uint8_t *reserve_anywhere_logged(uint64_t size,const char *what){
++ mach_vm_address_t a=0;
++ kern_return_t kr=mach_vm_map(mach_task_self(),&a,size,0,VM_FLAGS_ANYWHERE,MEMORY_OBJECT_NULL,0,FALSE,VM_PROT_NONE,VM_PROT_ALL,VM_INHERIT_DEFAULT);
++ if(kr!=KERN_SUCCESS){atomic_store(&g_last_kern,kr);fprintf(stderr,"[totk] VA probe %s %llu MiB -> kern %d\n",what,(unsigned long long)(size>>20),kr);return NULL;}
++ fprintf(stderr,"[totk] VA probe %s %llu MiB -> %#llx (limit 2^39=%#llx)\n",what,(unsigned long long)(size>>20),(unsigned long long)a,(unsigned long long)(1ULL<<39));
++ if(a+size>(1ULL<<39)){mach_vm_deallocate(mach_task_self(),a,size);atomic_store(&g_last_kern,KERN_INVALID_ADDRESS);return NULL;}
++ return (uint8_t *)(uintptr_t)a;
+ }
++static uint8_t *reserve_anywhere(uint64_t size){return reserve_anywhere_logged(size,"alloc");}
+ static void memory_init(void) {
+  if(alias_space)return;
+ #if TARGET_OS_IPHONE
+- /* iOS: the usable address space ends at 0xF_C000_0000 and 0x10_0000_0000.. is the system's, so stack+heap and the alias
+-    region go side by side at the lowest free gigabyte boundary from 0x3_0000_0000 (one reservation, then split). */
+- for(uint64_t at=LOW_SEARCH_FROM;at+LOW_SIZE+ALIAS_SIZE<=GUEST_ADDRESS_LIMIT&&!low_space;at+=1ULL<<30)low_space=reserve_fixed(at,LOW_SIZE+ALIAS_SIZE);
+- if(!low_space)runtime_fail("reserve guest stack, heap and alias regions");
+- alias_space=low_space+LOW_SIZE;
++ /* iOS 27: fixed mappings above the low VA window are rejected, but ANYWHERE reservations land below the 39-bit guest limit
++    in practice. Take ONE reservation for stack/heap+alias (so they stay side by side), trying smaller alias sizes; each
++    result is checked against the 39-bit limit and logged once. */
++   static const uint64_t asizes[]={0,8ULL,4ULL,3ULL,2ULL,1ULL};
++   for(unsigned k=0;k<sizeof asizes/sizeof *asizes&&!low_space;k++){
++     uint64_t size=k?(asizes[k]<<30):ALIAS_SIZE;if(size>ALIAS_SIZE)continue;
++     uint8_t *p=reserve_anywhere(LOW_SIZE+size);
++     fprintf(stderr,"[totk] iOS guest reservation try: alias %llu MiB -> %p (kern %d)\n",(unsigned long long)(size>>20),(void*)p,kern_last_error());
++     if(p){ low_space=p; alias_space=p+LOW_SIZE; alias_actual=size; }
++   }
++   if(!low_space)runtime_fail("reserve guest stack, heap and alias regions");
+ #else
+- alias_space=reserve_fixed(ALIAS_SPACE_AT,ALIAS_SIZE);
+- if(!alias_space)runtime_fail("reserve the 64 GiB alias region at 0x70_0000_0000");
+- for(uint64_t at=LOW_SEARCH_FROM;at+LOW_SIZE<=ALIAS_SPACE_AT&&!low_space;at+=1ULL<<30)low_space=reserve_fixed(at,LOW_SIZE);
+- if(!low_space)runtime_fail("reserve guest stack and heap regions below 2^39");
++ /* macOS 27 (26A428) reserves a randomized multi-GiB window inside the free 0x70_0000_0000..0x80_0000_0000 range, so a
++    fixed 64 GiB map at 0x70_0000_0000 can fail. Reserve stack/heap and the alias region side by side in one reservation,
++    scanning the 39-bit space for the largest GiB-aligned window that fits, and report the size obtained to the game. */
++ for(uint64_t size=ALIAS_SIZE; size>=(8ULL<<30) && !low_space; ) {
++  uint64_t total=LOW_SIZE+size;
++  for(uint64_t at=ALIAS_SPACE_AT;at+total<=GUEST_ADDRESS_LIMIT;at+=1ULL<<30) {
++   uint8_t *p=reserve_fixed(at,total);
++   if(p){ low_space=p; alias_space=p+LOW_SIZE; alias_actual=size;
++          fprintf(stderr,"[totk] macOS guest window %#llx, alias %llu GiB\n",(unsigned long long)at,(unsigned long long)(size>>30)); break; }
++  }
++  if(size>(32ULL<<30))size-=16ULL<<30;else if(size>(16ULL<<30))size-=8ULL<<30;else size-=4ULL<<30;
++ }
++ if(!low_space)runtime_fail("reserve guest stack, heap and alias regions below 2^39");
+ #endif
+  heap=low_space+HEAP_OFF;
+  fprintf(stderr,"[totk] guest layout: alias %#llx+%#llx stack %#llx+%#llx heap %#llx (cap %#llx)\n",(unsigned long long)ALIAS_START,ALIAS_SIZE,(unsigned long long)STACK_START,STACK_SIZE,(unsigned long long)(uintptr_t)heap,HEAP_CAP);
+ }
++/* The guest window is reserved from main() before UIKit/Metal map their own regions: on iOS 27 the free virtual-address
++   space above 0x7000_0000_0000 shrinks once the frameworks are up, and the game's boot-time reservation then no longer fits. */
++void runtime_reserve_guest_memory(void){ memory_init(); }
+ /* Scoped stack moves: independent host backing, copy back on unmap.
+  * Logical accounting is 4 KiB; Darwin protections are rounded to 16 KiB.
+  * The leading/trailing partial source pages cannot be isolated on this host.
+diff --git a/games/totk/scripts/extract_update_romfs.py b/games/totk/scripts/extract_update_romfs.py
+index 5425251..04a8c54 100644
+--- a/games/totk/scripts/extract_update_romfs.py
++++ b/games/totk/scripts/extract_update_romfs.py
+@@ -79,7 +79,11 @@ def merge(base, update, keys_path, hactool, output, *, base_romfs=None):
+         log = (result/'merge.log').read_text()
+         if code or re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', log):
+             (output.parent/(output.name+'-failure.log')).write_text(log)
+-        require(code == 0 and not re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', log), 'BKTR verification failed')
++        # A rebuilt/converted update NCA cannot carry valid Nintendo signatures: hactool prints "Signature (FAIL)" (and
++        # "NPDM Signature (FAIL)") for those, which is expected and unrelated to the RomFS. The IVFC levels below are the
++        # real integrity check; drop only the signature lines before deciding.
++        checked = re.sub(r'^\s*(Fixed-Key |NPDM )?Signature \(FAIL\).*\n', '', log, flags=re.M)
++        require(code == 0 and not re.search(r'\(FAIL\)|\(INVALID\)|Failed to|Error:', checked), 'BKTR verification failed')
+         require(all(re.search(rf'Level {i} \(GOOD\)', log) for i in range(6)), 'Missing verified IVFC levels')
+         image = result/'romfs.bin'
+         with image.open('rb') as f:
+diff --git a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
+index 2255a5d..4871d79 100644
+--- a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
++++ b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
+@@ -4248,6 +4248,10 @@ static void mfx_snapshot_scene(void) {
+                 if (pd.stencilAttachment.texture && pd.stencilAttachment.loadAction == MTLLoadActionLoad) pd.stencilAttachment.loadAction = MTLLoadActionDontCare; }
+       if (ns) { if (pd.depthAttachment.texture) pd.depthAttachment.storeAction = MTLStoreActionDontCare; if (pd.stencilAttachment.texture) pd.stencilAttachment.storeAction = MTLStoreActionDontCare; } }
+     if (!any) {
++        static uint64_t ntotal, nlast; ntotal++;
++        { uint64_t fr = atomic_load(&g_cur_frame); if (fr >= nlast + 300) { nlast = fr;
++          MLOG("[totk] pass without Metal targets: %llu total by frame %llu (%.2f per frame; last clear_only %d rt.n %d depth %d)", (unsigned long long)ntotal,
++               (unsigned long long)fr, (double)ntotal / (double)(fr ? fr : 1), clear_only, R.rt.n, R.rt.depth != NULL); } }
+         static int n; if (n++ < 8) {   /* TOTK: report what the attachments were (the pass is skipped, its draws are lost) */
+             for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i]) MLOG("【红】pass without Metal targets (clear_only %d): color %d serial %llu format %#x %ux%u target %d view %s%#x -> %s", clear_only, i,
+                 (unsigned long long)R.rt.color[i]->serial, R.rt.color[i]->d.format, R.rt.color[i]->d.width, R.rt.color[i]->d.height, R.rt.color[i]->d.target,
+@@ -4630,6 +4634,12 @@ static void pso_user_record(const char *fmt, ...) {
+ static MTLCompileOptions *totk_precise_opts(void) {
+     static MTLCompileOptions *o; if (o) return o;
+     o = [MTLCompileOptions new];
++#if TARGET_OS_IPHONE
++    /* The translated MSL is argument-buffer based; the default language version on iOS did not produce argument
++       encoders for it (newArgumentEncoderWithBufferIndex returned a 0-length encoder). MSL 3.0 is what the Mac
++       toolchain used when the seed was prepared. */
++    if (@available(iOS 17.0, *)) o.languageVersion = MTLLanguageVersion3_0;
++#endif
+     if (@available(macOS 15.0, *)) o.mathMode = MTLMathModeSafe; else o.fastMathEnabled = NO;
+     /* TOTK_FAST_MATH=1 (measurement only): fast math for every translated shader. Known to break the tile-light vertex
+        shader's integer-division idiom, so pictures from such runs are not evidence of correctness. */
+@@ -4745,7 +4755,10 @@ them in memory (the Mac's behaviour before). */
+         if (o->arg_len != (NSUInteger)(8 * (max_aid + 1)) || (o->arg_len & 7))
+             MDIE("着色器 %s 参数块布局异常：encodedLength=%lu maxAid=%d", o->key, (unsigned long)o->arg_len, max_aid);
+     }
+-    if (o->rf.has_c1) c1_store(o, full);
++    /* The background warm list may name a variant whose .metal source is not on this device (the cache is copied from
++       the Mac, and iOS sometimes has only the precompiled metallib): c1_store would memcpy from a nil source. Warming is
++       optional, so skip the c1 bookkeeping for it. */
++    if (o->rf.has_c1 && full) c1_store(o, full);
+     return o;
+ }
+ 

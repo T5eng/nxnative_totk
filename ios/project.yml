@@ -1,0 +1,43 @@
+name: TOTK
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "26.0"
+configFiles:
+  Release: Gen/ios.xcconfig
+  Debug: Gen/ios.xcconfig
+targets:
+  TOTK:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - path: Gen/embed.S
+      - path: Gen/pso_manifest.tsv
+        buildPhase: resources
+      - path: Gen/shader-map.tsv
+        buildPhase: resources
+      # The MacNativeGames checkout with patches/0001-ios-port.patch applied:
+      - path: ../third_party/MacNativeGames/games/totk/runtime
+        excludes: ["frontend.m", "loader.c", "game_patches.c"]
+      - path: ../third_party/MacNativeGames/games/totk/runtime/game_patches_v143.c
+      - path: ../third_party/MacNativeGames/games/totk/runtime/loader.c
+        compilerFlags: "-Dmain=totk_loader_main"
+      - path: ../third_party/MacNativeGames/games/totk/third_party/d2r_gfx/gfx/nvn
+      - path: ../third_party/MacNativeGames/games/totk/third_party/d2r_gfx/gfx/tex
+    settings:
+      base:
+        # Change these three for your own signing:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.totkios
+        PRODUCT_NAME: TOTK
+        DEVELOPMENT_TEAM: ""            # your Apple Developer team id (or set it in Xcode)
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        SWIFT_VERSION: "5.0"
+        CLANG_ENABLE_OBJC_ARC: YES
+        CODE_SIGN_ENTITLEMENTS: Gen/TOTK.entitlements
+        OTHER_CPLUSPLUSFLAGS: $(inherited)
+        GCC_OPTIMIZATION_LEVEL: "2"

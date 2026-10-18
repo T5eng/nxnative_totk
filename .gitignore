@@ -1,0 +1,32 @@
+# generated from the user's own game files — never commit
+ios/Gen/*.bin
+ios/Gen/embed.S
+ios/Gen/ios_embed.h
+ios/Gen/ios.xcconfig
+ios/Gen/pso_manifest.tsv
+ios/Gen/shader-map.tsv
+ios/Gen/pso_user.tsv
+work/
+third_party/
+*.xcodeproj
+*.xcworkspace
+build/
+DerivedData/
+*.ipa
+*.dmg
+.DS_Store
+
+# game data / dumps / keys
+*.xci
+*.nsp
+*.nca
+*.nro
+*.kip
+romfs.bin*
+*.bfttf
+*.metallib
+*.metal
+*.json
+shader-cache/
+keys*
+__pycache__/
