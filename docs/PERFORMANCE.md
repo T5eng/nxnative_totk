@@ -99,6 +99,27 @@ The iPhone is driven entirely through `Documents/env.txt` and the autoload path,
 
 The script needs `afcclient` (libimobiledevice) for file push/pull and `devicectl` for installation/launch.
 
+## 4b. The chosen baseline: 30 FPS game + MetalFX interpolation (`TOTK_MFX=interp30`)
+
+The device baseline is now the game at its native 30 FPS with one interpolated frame between two game frames
+(`TOTK_MFX=interp30`, display link 120 Hz). Measured on the iPhone Air:
+
+| Metric | Value |
+|---|---|
+| game frame time | 33.3 ms (30 FPS, as the game intends) |
+| interpolated frames | ~48–57 % of game frames (713 / 1500 in one run) |
+| MetalFX interpolation GPU | 6.5 ms (cool) – 14 ms (warm) p50 |
+| presented rate | ~45–52 FPS (limited by the interpolation misses) |
+| replay CPU | 7–11 ms per game frame (fits the 33 ms budget) |
+
+Why only half the frames get interpolated: the runtime counts `未插：缺输入` for the rest, with the `相机`/`深度`/`UI`
+input counters frozen after the first seconds — the MetalFX scene/camera/depth detection stops following the game once its
+dynamic-resolution scene size changes. That is the main defect to fix before this baseline can present a full 60 FPS.
+Until then the mode is stable (one simulation rate, no speed changes) but the presented rate is below 60.
+
+`MetalFX GPU` at 6.5–14 ms also means this mode costs more GPU than plain 60 FPS rendering on this phone, so canvas
+size and thermal behaviour matter more here, not less.
+
 ## 5. Thermal behaviour (the dominant stability factor)
 
 Sequential A/B runs produced wildly different numbers until we noticed the device was heating up. After a 150 s cooldown
