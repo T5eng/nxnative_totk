@@ -99,8 +99,37 @@ The iPhone is driven entirely through `Documents/env.txt` and the autoload path,
 
 The script needs `afcclient` (libimobiledevice) for file push/pull and `devicectl` for installation/launch.
 
-## 5. Status
+## 5. Thermal behaviour (the dominant stability factor)
 
-The measurements above were taken before the device went offline for this analysis round; the iPhone A/B series
-(canvas size, MetalFX, replay switches) is prepared but not executed. The `TOTK_IOS_CANVAS` switch itself is implemented
-in the runtime patch.
+Sequential A/B runs produced wildly different numbers until we noticed the device was heating up. After a 150 s cooldown
+the same configuration measured:
+
+| Run state | frame p50 | replay CPU/frame | draws/frame | game mode |
+|---|---|---|---|---|
+| **Cool** (150 s idle before launch) | 16.7 ms in every window (60 FPS) | 2.1 → 6.9 ms | 105 → 1132 → 542 | 60 FPS |
+| **Soaked** (several back-to-back runs) | 32.3–33.3 ms (30 FPS) | 11.5–13.1 ms | ~1000–1100 | 30 FPS |
+
+The replay (and to a lesser degree the GPU) degrades by roughly 2× when the phone is hot. The game then misses the
+16.7 ms budget, switches its present interval to 30 FPS, and — because of the half-step selector — the world speed
+visibly changes. This is also why the Mac never shows the effect: it has active cooling and a ~2× headroom at 60 FPS.
+
+Consequences for measurement: interleaved A/B on an iPhone is meaningless unless the device is cooled between runs
+(≥2–3 min idle with the app closed) or the runs are short enough not to heat it. The `perf_ab.sh` series should be used
+with that cooldown, and the reported `draws/frame` must be similar (the opening area's scene changes for the first
+minute after a load).
+
+Optimisation therefore splits into two tracks: **reduce sustained power** (canvas size, output size, frame-rate cap,
+avoiding MetalFX which adds GPU work) and **reduce replay CPU** (per-draw cost, section 3 C).
+
+## 6. Status
+
+Measured on the device in this round:
+
+* cool baseline: 60 FPS locked, 0–49 dropped presents per 300 frames, GPU 1.9 → 12.8 ms as the opening area fills in;
+* `TOTK_IOS_CANVAS=1280x720`: GPU ~2–3 ms lower per frame at comparable draw counts, memory ~100 MiB lower;
+* `TOTK_MFX=interp30`: runs on this GPU (Metal 4 FX interpolation supported) but presentation is worse — 269–285 dropped
+  presents per 300, p99 66–75 ms; not recommended in this state;
+* `TOTK_ARG_EPOCH=1`, `TOTK_CHUNK_DRAWS=150`, `TOTK_DEFERRED_BINDS=1`: no clear win, but the runs were thermally
+  confounded; they need a cooled re-test.
+
+The `TOTK_IOS_CANVAS` switch, the analysis above and `ios/tools/perf_ab.sh` are in the repository.
