@@ -440,7 +440,7 @@ index 87b1ad5..b83b1bb 100644
                         (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms);
                // 可见性：长帧「晚出来」的那段时间屏幕上停着的是上一帧；上一帧若是读取画面（或本帧自己就是），玩家看到的只是读取画面多停了一下，没有运动被打断
 diff --git a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
-index 2255a5d..4b7d0cf 100644
+index 2255a5d..a967749 100644
 --- a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
 +++ b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
 @@ -3507,7 +3507,7 @@ Before the first UI draw into it (a TOTK UI vertex shader) the pass is ended and
@@ -452,6 +452,15 @@ index 2255a5d..4b7d0cf 100644
  static id<MTLRenderPipelineState> g_enc_pso; static id<MTLDepthStencilState> g_enc_dss;   // 本编码器上已设的（相同不重设） | Already set on this encoder (not set again if identical)
  static int g_enc_vis, g_enc_has_vis;   // 本编码器当前的可见性计数模式（0 关 / 槽号 + 1）、是否挂了可见性缓冲 | This encoder's current visibility count mode (0 off / slot number + 1), and whether a visibility buffer is attached
  static int g_pso_dirty = 1, g_dss_dirty = 1;   // 回放中改了管线 / 深度模板相关状态 | Pipeline / depth-stencil related state was changed during replay
+@@ -4139,7 +4139,7 @@ static void mfx_pass_setup(MTL4RenderPassDescriptor *pd) {
+ /* TOTK_MFX: vertex shaders of the game's UI (layout panes, text, icons, the minimap); the first draw into the canvas with
+    one of them ends the scene. */
+ static int mfx_ui_vs(const char *key) {
+-    static const char *const ui[] = {"7f2113e2", "e9fd7b43", "a662e313", "16684efc", "3e11cee5", "48c18ae6", "35cbc686", "4872bec9", "9f47ed90"};
++    static const char *const ui[] = {"7f2113e2", "e9fd7b43", "a662e313", "16684efc", "3e11cee5", "48c18ae6", "35cbc686", "4872bec9", "9f47ed90", "eb23ab56", "0ac9a549"};
+     for (size_t i = 0; i < sizeof ui / sizeof *ui; i++) if (!strncmp(key, ui[i], 8)) return 1;
+     return 0;
+ }
 @@ -4248,6 +4248,10 @@ static void mfx_snapshot_scene(void) {
                  if (pd.stencilAttachment.texture && pd.stencilAttachment.loadAction == MTLLoadActionLoad) pd.stencilAttachment.loadAction = MTLLoadActionDontCare; }
        if (ns) { if (pd.depthAttachment.texture) pd.depthAttachment.storeAction = MTLStoreActionDontCare; if (pd.stencilAttachment.texture) pd.stencilAttachment.storeAction = MTLStoreActionDontCare; } }
@@ -511,7 +520,7 @@ index 2255a5d..4b7d0cf 100644
 +      int on_canvas = g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas;
 +      if (!g_mfx.scene_done && on_canvas && mfx_enabled()) {
 +        int by_key = pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key);
-+        int by_state = fb && g_mfx.canvas_draws >= 6 && (S.color.blend_en & 1) && !S.ds.dt;
++        int by_state = fb && (S.color.blend_en & 1) && !S.ds.dt && (g_mfx.canvas_draws >= 6 || (R.rt.depth == NULL && g_mfx.canvas_draws >= 1));
 +        if (by_key || by_state) {
 +            if (by_state && !by_key) { static int once; if (!once++) MLOG("[mfx] UI fallback: first blended depth-off canvas draw after %u draws (vs %s)", g_mfx.canvas_draws, pr && pr->sh[0] ? pr->sh[0]->key : "-"); }
 +            mfx_snapshot_scene();   // TOTK_MFX: first UI draw into the canvas: copy the finished scene first
