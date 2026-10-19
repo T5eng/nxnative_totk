@@ -86,27 +86,6 @@ off after the canvas has already been drawn into several times this frame" as th
   fix direction is to remove the selector compensation in the build-time veneer and re-export the modules; it is not
   done in this revision.
 
-## 5b. HDR / EDR output (prototype)
-
-The game renders internally in HDR: the scene target is `RG11B10Float`, the UI layer is `RGBA16Float` (the MFX path
-already captures both), and the game's own tone-map shader PQ-encodes the composite through a 32³ LUT into 8-bit SDR.
-The port presents that SDR picture.
-
-`TOTK_HDR=1` switches the iOS present path to an extended-range (EDR) drawable:
-
-* the `CAMetalLayer` is created with `pixelFormat = RGBA16Float`, `wantsExtendedDynamicRangeContent = YES` and the
-  extended linear sRGB colour space;
-* the present pipeline gets an HDR variant (`present_pipeline_hdr`): the game's sRGB picture is converted to linear light
-  and multiplied by `TOTK_HDR_GAIN` (default 1.8), so SDR white maps to 1.8× white and the display's HDR headroom is
-  actually used. The same selection is made in the MTL4 present encoder (mixing a BGRA8 pipeline with a 16F drawable
-  crashed the GPU driver).
-
-This is the container half of HDR: the content is still the game's SDR tone-mapped picture, brightness-expanded. True HDR
-needs the present stage to consume the game's HDR scene (`RG11B10Float`) and UI (`RGBA16Float`) and tone-map them itself
-(ACES/PQ with exposure) instead of the game's 8-bit output; the MFX path already has both textures, and the exposure hook
-(`dm_bright_k()`, `TOTK_BRIGHT`) is in place. With interpolation on, the EDR path adds no GPU cost in the tested scene
-(MFX GPU p50 unchanged at ~8.5 ms, frame p50 33.4 ms).
-
 ## 6. iOS address space and guest memory
 
 Measured on iOS 27 / iPhone Air:

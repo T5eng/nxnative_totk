@@ -62,24 +62,6 @@ index a78b474..3c72afc 100644
    pthread_t guest;pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,8*1024*1024);int err=pthread_create(&guest,&attr,guest_main,(void *)callback);pthread_attr_destroy(&attr);if(err)runtime_fail("native game thread creation");
    [NSApp run];runtime_fail("native event loop returned unexpectedly");
   }
-diff --git a/games/totk/runtime/frontend_ios.m b/games/totk/runtime/frontend_ios.m
-index fadb410..6c2c75d 100644
---- a/games/totk/runtime/frontend_ios.m
-+++ b/games/totk/runtime/frontend_ios.m
-@@ -73,6 +73,13 @@ -(void)tick:(CADisplayLink *)l{(void)l;pthread_mutex_lock(&vsyncLock);for(unsign
- void runtime_ios_attach_layer(CAMetalLayer *layer,UIView *host){
-  bootStartNS=runtime_now_ns();
-  metalLayer=layer;metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;metalLayer.framebufferOnly=NO;
-+ /* TOTK_HDR=1: present through an extended-range (EDR) drawable. The present shader converts the game's sRGB picture to
-+    linear light and multiplies it by TOTK_HDR_GAIN, so values above SDR white use the display's HDR headroom. This is the
-+    first step towards true HDR; the game itself still tone-maps to SDR. */
-+ { const char *h=getenv("TOTK_HDR");
-+   if(h&&atoi(h)){ metalLayer.pixelFormat=MTLPixelFormatRGBA16Float; metalLayer.wantsExtendedDynamicRangeContent=YES;
-+     metalLayer.colorspace=CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
-+     fprintf(stderr,"[totk] HDR: EDR drawable (RGBA16Float, extended linear sRGB)\n"); } }
-  CGFloat s=host.window.screen.nativeScale>0?host.window.screen.nativeScale:UIScreen.mainScreen.nativeScale;
-  metalLayer.contentsScale=s;
-  /* TOTK_IOS_DRAWABLE_H (default 720; 0 = native pixels): build the drawable this many pixels tall at the view's aspect, so the
 diff --git a/games/totk/runtime/game_patches_v143.c b/games/totk/runtime/game_patches_v143.c
 index 150da45..58a1e8c 100644
 --- a/games/totk/runtime/game_patches_v143.c
@@ -458,7 +440,7 @@ index 87b1ad5..b83b1bb 100644
                         (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms);
                // 可见性：长帧「晚出来」的那段时间屏幕上停着的是上一帧；上一帧若是读取画面（或本帧自己就是），玩家看到的只是读取画面多停了一下，没有运动被打断
 diff --git a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
-index 2255a5d..95f6a2a 100644
+index 2255a5d..a967749 100644
 --- a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
 +++ b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
 @@ -3507,7 +3507,7 @@ Before the first UI draw into it (a TOTK UI vertex shader) the pass is ended and
@@ -548,59 +530,7 @@ index 2255a5d..95f6a2a 100644
      id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
      g_fd_dw = NULL; g_fd_di = NULL;
      if (!en) { g_draw_skip[8]++; return; }
-@@ -10624,7 +10659,33 @@ int mtl_display_hz(void) {
- static _Atomic uint64_t g_present_stall_ns;   // 单测用：出图线程每次出图前额外停顿（模拟 drawable 迟迟不可用） | For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable)
- static CAMetalLayer *g_present_layer_resident;
- void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
-+static id<MTLRenderPipelineState> g_blit_pso_hdr; static MTLPixelFormat g_blit_fmt_hdr;
-+static float hdr_gain(void) { static float v = -1; if (v < 0) { const char *e = getenv("TOTK_HDR_GAIN"); v = e ? strtof(e, NULL) : 1.8f; if (!(v >= 1.0f) || v > 8.0f) v = 1.8f; } return v; }
-+/* TOTK_HDR: the EDR present shader. The game's picture is sRGB-encoded (8-bit); convert to linear light and apply the
-+   gain so SDR white maps to gain x white and the display's HDR headroom is used for it. */
-+static void present_pipeline_hdr(void) {
-+    if (g_blit_pso_hdr) return;
-+    NSMutableString *msl = [NSMutableString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\n"
-+        "struct V { float4 p [[position]]; float2 uv; };\n"
-+        "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
-+        "struct Crop { float4 rect; float4 edge; };\n"
-+        "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {"
-+        " float2 uv = clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw);"
-+        " float4 v = t.sample(s, uv);"
-+        " float3 lin = pow(max(v.rgb, 0.0), float3(2.2));"
-+        " return float4(lin * %.4f, 1.0); }\n", hdr_gain()];
-+    NSError *e = nil;
-+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:msl options:nil error:&e];
-+    if (!lib) MDIE("HDR 出图着色器编译失败 %s", e.localizedDescription.UTF8String);
-+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-+    pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
-+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
-+    g_blit_pso_hdr = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
-+    if (!g_blit_pso_hdr) MDIE("HDR 出图管线失败 %s", e.localizedDescription.UTF8String);
-+    MLOG("HDR 出图管线已建（线性化 + 增益 %.2f）", hdr_gain());
-+}
- static void present_pipeline(MTLPixelFormat format) {
-+    if (format == MTLPixelFormatRGBA16Float) { present_pipeline_hdr(); g_blit_fmt_hdr = format; return; }
-     if (!g_blit_pso || g_blit_fmt != format) {
-         static const char *src_msl =
-             "#include <metal_stdlib>\nusing namespace metal;\n"
-@@ -10800,7 +10861,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
-     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp]; es_reset();
-     [en setViewport:vp];
--    [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:src atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-+    [en setRenderPipelineState:dst.pixelFormat == MTLPixelFormatRGBA16Float ? g_blit_pso_hdr : g_blit_pso]; [en setFragmentTexture:src atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-     float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
-                    (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
-     [en setFragmentBytes:uv length:sizeof uv atIndex:0];
-@@ -10855,7 +10916,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
-     uv[4] = (cx + 0.5f) / pic.width; uv[5] = (cy + 0.5f) / pic.height; uv[6] = (cx + cw - 0.5f) / pic.width; uv[7] = (cy + ch - 0.5f) / pic.height;
-     [args setAddress:g_present_uv[uv_i].gpuAddress atIndex:0];
-     [en setArgumentTable:args atStages:MTLRenderStageFragment];
--    [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
-+    [en setViewport:vp]; [en setRenderPipelineState:dst.pixelFormat == MTLPixelFormatRGBA16Float ? g_blit_pso_hdr : g_blit_pso];
-     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-     MTLViewport ovp; float fuv[8];
-     if (fps_overlay_prepare(uv_i, vp, &ovp, fuv)) {   // argument-table bindings are captured per draw, so rebinding here leaves the game picture's draw intact
-@@ -11652,7 +11713,7 @@ static int mfx_present_frame_body(const tex_t *t, double period, int discard) {
+@@ -11652,7 +11687,7 @@ static int mfx_present_frame_body(const tex_t *t, double period, int discard) {
              d.storageMode = MTLStorageModeShared; g_mfx_swap_prev = [g_dev newTextureWithDescriptor:d]; }
          if (sc && g_mfx_swap_prev) { mtl_finish_gpu(); id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder]; [b copyFromTexture:sc toTexture:g_mfx_swap_prev]; [b endEncoding]; cb_commit(cb); cb_wait(cb); }
      }

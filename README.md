@@ -60,7 +60,6 @@ TOTK_AUTOLOAD=1         # press A at the title and load the newest save automati
 TOTK_TOUCH_UI=0         # hide the on-screen controls (they are on by default)
 TOTK_IOS_CANVAS=1280x720  # iOS only: game canvas size (default 1920x1080); lower = cheaper GPU
 TOTK_MFX=interp30       # optional: render at the game's 30 FPS, MetalFX interpolates to 60
-TOTK_HDR=1              # optional: extended-range (EDR) drawable; TOTK_HDR_GAIN scales SDR white (default 1.8)
 ```
 
 ## Touch controls
