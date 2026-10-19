@@ -63,7 +63,7 @@ index a78b474..3c72afc 100644
    [NSApp run];runtime_fail("native event loop returned unexpectedly");
   }
 diff --git a/games/totk/runtime/game_patches_v143.c b/games/totk/runtime/game_patches_v143.c
-index 150da45..7616e63 100644
+index 150da45..58a1e8c 100644
 --- a/games/totk/runtime/game_patches_v143.c
 +++ b/games/totk/runtime/game_patches_v143.c
 @@ -8,6 +8,14 @@
@@ -134,7 +134,7 @@ index 150da45..7616e63 100644
      fprintf(stderr, "[totk] 1.4.3 60 FPS: seven verified controller instructions; original game frame-time calculation\n");
  }
  
-@@ -142,6 +164,22 @@ uint64_t runtime_output_res_extra_bytes(void){
+@@ -142,6 +164,31 @@ uint64_t runtime_output_res_extra_bytes(void){
      uint64_t kib=(uint64_t)ceil(113664.0*ratio/1024.0)*1024-113664;return kib<<10;
  }
  static void patch_output_res(Module *m){
@@ -147,10 +147,19 @@ index 150da45..7616e63 100644
 +    uint64_t dpage=(m->file_size+0x3fff)&~0x3fffULL;
 +    if(dpage+0x4000!=m->size){fprintf(stderr,"[totk] 1.4.3 output: iOS data page missing (size %#llx, file %#llx)\n",
 +        (unsigned long long)m->size,(unsigned long long)m->file_size);return;}
++    /* TOTK_IOS_CANVAS=<w>x<h>: the canvas the game composes in (the swapchain stays at the build-time 2K size).
++       Lowering it cuts the iPhone's GPU cost; the host still upscales to the drawable. */
++    unsigned cw=1920,ch=1080;
++    { const char *cv=getenv("TOTK_IOS_CANVAS");
++      if (cv && *cv) { unsigned a=0,b=0; char tail=0;
++        if (sscanf(cv,"%ux%u%c",&a,&b,&tail)!=2 || a<640 || b<360 || a>2560 || b>1440 || (a&1) || (b&1))
++            runtime_fail("TOTK_IOS_CANVAS must be <width>x<height>, even, 640x360..2560x1440");
++        cw=a; ch=b; } }
 +    uint8_t *page=m->base+dpage;
-+    *(uint64_t *)(void *)(page+32)=pack_size(1920,1080);   /* the output size the game reads (canvas) */
-+    *(uint64_t *)(void *)(page+40)=0;                      /* renderer object, published by the game later */
-+    fprintf(stderr,"[totk] 1.4.3 output: iOS data page initialised (canvas 1920x1080%s)\n",
++    *(uint64_t *)(void *)(page+32)=pack_size(cw,ch);        /* the output size the game reads (canvas) */
++    *(uint64_t *)(void *)(page+40)=0;                       /* renderer object, published by the game later */
++    fprintf(stderr,"[totk] 1.4.3 output: iOS data page initialised (canvas %ux%u%s%s)\n",cw,ch,
++        cw!=1920||ch!=1080?" (TOTK_IOS_CANVAS)":"",
 +        on2?" (TOTK_OUTPUT_RES requests a larger swapchain; key 3 switches once the game has laid out)":"");
 +    (void)w2;(void)h2;return;
 +#endif

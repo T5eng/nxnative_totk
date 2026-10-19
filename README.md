@@ -21,6 +21,7 @@ distributed here; you need your own legally obtained copy of the game and its up
 | `docs/PORTING.md` | How the port works: architecture and the iOS-specific fixes |
 | `docs/MACOS.md` | Building/running the macOS version with the same patch (and its macOS 27 fixes) |
 | `docs/TECHNICAL.md` | Key technical points: module embedding, NVN→Metal replay, shader variants, pacing, address space, async replay |
+| `docs/PERFORMANCE.md` | Measured frame times on Mac/iPhone, bottlenecks and the A/B optimisation plan |
 | `ios/README.md` | Full iOS build and device-setup instructions |
 
 ## How it works (short version)
@@ -57,6 +58,8 @@ DM_PRESENT_HZ=60        # display link rate
 TOTK_ASYNC_REPLAY=1     # replay on a separate thread (needed for 60 FPS)
 TOTK_AUTOLOAD=1         # press A at the title and load the newest save automatically
 TOTK_TOUCH_UI=0         # hide the on-screen controls (they are on by default)
+TOTK_IOS_CANVAS=1280x720  # iOS only: game canvas size (default 1920x1080); lower = cheaper GPU
+TOTK_MFX=interp30       # optional: render at the game's 30 FPS, MetalFX interpolates to 60
 ```
 
 ## Touch controls
