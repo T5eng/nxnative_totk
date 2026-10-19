@@ -400,6 +400,45 @@ index 5425251..04a8c54 100644
          require(all(re.search(rf'Level {i} \(GOOD\)', log) for i in range(6)), 'Missing verified IVFC levels')
          image = result/'romfs.bin'
          with image.open('rb') as f:
+diff --git a/games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c b/games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c
+index 87b1ad5..b83b1bb 100644
+--- a/games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c
++++ b/games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c
+@@ -2108,7 +2108,7 @@ void nvn_set_framewait(int on) {
+     *(volatile uint8_t *)(uintptr_t)(g_game_sys + 0x224) = on ? 1 : 2;
+     LOG("[flag] framewait = %d（写 +0x224 = %d）", on, on ? 1 : 2);
+ }
+-NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { if (((win_t *)w)->interval != v) LOG("[nvn] 游戏设出图间隔 %d → %d", ((win_t *)w)->interval, v); ((win_t *)w)->interval = v; if (!g_game_sys) find_game_sys(); }
++NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { if (((win_t *)w)->interval != v) { static uint64_t last_iv; uint64_t n_iv = now_ns(); if (n_iv - last_iv >= 1000000000ull) { LOG("[nvn] 游戏设出图间隔 %d → %d", ((win_t *)w)->interval, v); last_iv = n_iv; } } ((win_t *)w)->interval = v; if (!g_game_sys) find_game_sys(); }
+ NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
+     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
+     if (memcmp(o->crop, v, sizeof v)) { LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh); if (getenv("TOTK_SIZE_CHAIN")) guest_chain("window crop"); }
+@@ -2402,7 +2402,9 @@ void set_time_constraint_comp_x(uint64_t period_ns, uint64_t comp_ns) {
+     LOG("[nvn] 翻译线程时间约束策略（周期 %.3f ms、计算 %.3f ms）%s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "已设" : "设置失败");
+ }
+ static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
+-static void set_time_constraint(uint64_t period_ns) { int f = rt_comp_fixed_ms(); set_time_constraint_comp(period_ns, f > 0 ? (uint64_t)f * 1000000ull : 2000000ull); }   // 首次：固定值，或 auto 的起始值 2 ms | first time: the fixed value, or auto's starting value of 2 ms
++static void set_time_constraint(uint64_t period_ns) {
++    static uint64_t last_ns; { uint64_t n = now_ns(); if (last_ns && n - last_ns < 200000000ull) return; last_ns = n; }
++    int f = rt_comp_fixed_ms(); set_time_constraint_comp(period_ns, f > 0 ? (uint64_t)f * 1000000ull : 2000000ull); }   // 首次：固定值，或 auto 的起始值 2 ms | first time: the fixed value, or auto's starting value of 2 ms
+ // 每帧在取图处调：记本线程自上次以来的 CPU 时间；auto 模式下按 p90 重新声明
+ // Called every frame at acquire: records this thread's CPU time since the last call; in auto mode re-declares based on p90
+ static void rt_comp_tick(uint64_t period_ns) {
+@@ -2654,12 +2656,12 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+     g_acq_wait_ns = g_pq_wait_ns = 0;
+     if (f >= 8) { double g = mtl_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_hr[g_hn++ % HRN] = g; }   // GPU 时间滞后 8 帧取（已完成） | GPU time is taken 8 frames late (already completed)
+         { lf_rec *r = &g_lf[(f - 8) % LFN];   // 长帧日志（缺省开，DM_LONGFRAME=0 关）：整帧 > 20 ms 或 GPU > 16.7 ms、且明显高于近况，才打一行 | long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, and it is clearly above recent conditions
+-          static int on = -1; if (on < 0) { const char *e = getenv("DM_LONGFRAME"); on = !(e && !strcmp(e, "0")); }
++          static int on = -1, verbose; static uint64_t last_ms; if (on < 0) { const char *e = getenv("DM_LONGFRAME"); on = !(e && !strcmp(e, "0")); verbose = e && !strcmp(e, "1"); }
+           // 「长」是相对近况说的：稳定跑在 30 帧（菜单 / 无窗口宿主）或持续过载时每帧都 > 20 ms，那不是长帧，不刷屏——要比近 16 帧的滑动均值高出四成才算
+           // "Long" is relative to recent conditions: when running steadily at 30 fps (menus / windowless host) or under sustained overload, every frame is > 20 ms; those are not long frames and must not flood the log - a frame has to be 40% above the sliding mean of the last 16 frames to count
+           static double ef = 16.7, eg = 8; int lf = r->fr > 20.0 && r->fr > 1.4 * ef, lg = g > 16.7 && g > 1.3 * eg;
+           if (r->f == f - 8) { ef += ((r->fr < 3 * ef ? r->fr : 3 * ef) - ef) / 16; eg += ((g < 3 * eg ? g : 3 * eg) - eg) / 16; }
+-          if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[512];
++          if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg) && (verbose || now_ns() - last_ms >= 2000000000ull)) { last_ms = now_ns(); char b[512];
+               snprintf(b, sizeof b, "帧 %llu（%.2f s）整帧 %.1f ms，提交+出图 %.1f ms，GPU %.1f ms；新建管线 %u 条 + 着色器库 %u 个共 %.1f ms；上传贴图 首传 %u 张 + 重传 %u 次 %.1f MB / %.1f ms",
+                        (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms);
+               // 可见性：长帧「晚出来」的那段时间屏幕上停着的是上一帧；上一帧若是读取画面（或本帧自己就是），玩家看到的只是读取画面多停了一下，没有运动被打断
 diff --git a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
 index 2255a5d..4b7d0cf 100644
 --- a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m

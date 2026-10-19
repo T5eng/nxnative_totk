@@ -67,7 +67,10 @@ static void boot_env(void) {
     NSString *log = [g_doc stringByAppendingPathComponent:@"log.txt"], *prev = [g_doc stringByAppendingPathComponent:@"log.prev.txt"];
     [NSFileManager.defaultManager removeItemAtPath:prev error:nil];
     [NSFileManager.defaultManager moveItemAtPath:log toPath:prev error:nil];
-    if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+    /* Full buffering: the runtime logs are diagnostics and are written to a file on the phone; line buffering made every
+       single log line a write() syscall (the log can be a few hundred lines per second around frame-rate transitions). */
+    static char logbuf[1 << 16];
+    if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, logbuf, _IOFBF, sizeof logbuf);
     setenv("TOTK_ROMFS", "extracted/v143/romfs", 0);
     setenv("TOTK_SHARED_FONTS", "shared-fonts", 0);
     setenv("TOTK_ROMFS_PROOF_DIR", g_doc.fileSystemRepresentation, 0);

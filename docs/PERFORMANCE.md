@@ -142,7 +142,26 @@ minute after a load).
 Optimisation therefore splits into two tracks: **reduce sustained power** (canvas size, output size, frame-rate cap,
 avoiding MetalFX which adds GPU work) and **reduce replay CPU** (per-draw cost, section 3 C).
 
-## 6. Status
+## 6. Diagnostics audit (what is on by default and what it costs)
+
+The iOS build is a Release build (`GCC_OPTIMIZATION_LEVEL=2`), and every `DM_*` diagnostic switch is off by default. The
+audit found these default-on items worth knowing about:
+
+| Item | Cost | Switch |
+|---|---|---|
+| **GPU keep-alive spinner** | a ~1 ms compute kernel on a separate queue whenever the GPU is idle and the game is rendering. It keeps the GPU clock up (on the Mac: frame GPU 12.1 → 9.1 ms) but costs power and heat continuously — the wrong trade on a phone. | `TOTK_GPU_KEEPALIVE=0` |
+| **Pipeline prediction** | per submit, a background scan ahead through the command buffer computes predicted pipeline keys and compiles them in parallel. On iOS the pipelines are precompiled metallib variants, so the prediction is mostly pure CPU cost. | `TOTK_PSO_PREDICT=0` |
+| **Long-frame log** | a line per >20 ms frame that is >40 % above the recent average; during frame-rate transitions this used to be several lines per second, each a write() to the log file. Now rate-limited. | `DM_LONGFRAME=1` verbose, `=0` off |
+| **Present-interval flapping** | every 1↔2 interval flip re-applied the mach time-constraint policy on the translate and present threads and printed three lines. Now debounced (200 ms) and logged at most once per second. | `TOTK_RT_COMP=<ms>` fixes the declaration |
+| **stderr buffering** | stderr went to `Documents/log.txt` line-buffered, i.e. one `write()` syscall per log line. Now a 64 KiB full buffer. | — |
+| **Uniform snapshots** (`TOTK_UBO_SNAPSHOT`, on) | copies the uniform ranges the game may overwrite while the async replay still reads them — this is correctness for async replay, not debug. | `=0` only for A/B |
+| Statistics | 300-frame summaries (6 lines) and the per-frame diagnostic ring (atomic counters) — negligible. | — |
+| Off by default | driver cache (`TOTK_DRV_CACHE`), texture plan, per-draw/pass dumps, anomaly detector, reglum, call lists, `DM_NVN_TSV`. | — |
+
+A quick way to check the log volume on a device: pull `Documents/log.txt` and count lines per second of play
+(`perf_ab.sh` does this implicitly); a steady session should be well under ~10 lines/s.
+
+## 7. Status
 
 Measured on the device in this round:
 
