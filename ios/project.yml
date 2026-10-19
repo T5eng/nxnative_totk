@@ -12,6 +12,7 @@ targets:
     platform: iOS
     sources:
       - Sources
+      - Assets.xcassets
       - path: Gen/embed.S
       - path: Gen/pso_manifest.tsv
         buildPhase: resources
@@ -41,3 +42,4 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Gen/TOTK.entitlements
         OTHER_CPLUSPLUSFLAGS: $(inherited)
         GCC_OPTIMIZATION_LEVEL: "2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
