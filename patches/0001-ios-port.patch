@@ -401,9 +401,18 @@ index 5425251..04a8c54 100644
          image = result/'romfs.bin'
          with image.open('rb') as f:
 diff --git a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
-index 2255a5d..4871d79 100644
+index 2255a5d..4b7d0cf 100644
 --- a/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
 +++ b/games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m
+@@ -3507,7 +3507,7 @@ Before the first UI draw into it (a TOTK UI vertex shader) the pass is ended and
+    depth and the camera. role: 2 UI with the game's blend, 3 opaque UI. */
+ #define MFX_ROLE_UI 2
+ #define MFX_ROLE_UI_OPAQUE 3
+-static struct { uint64_t canvas, last_c0, swap[4]; uint32_t swap_w, swap_h; int nswap, scene_done, ui_cleared, depth_done, want_cam, role; uint64_t frames; } g_mfx;
++static struct { uint64_t canvas, last_c0, swap[4]; uint32_t swap_w, swap_h; int nswap, scene_done, ui_cleared, depth_done, want_cam, role; uint64_t frames; uint32_t canvas_draws; } g_mfx;
+ static id<MTLRenderPipelineState> g_enc_pso; static id<MTLDepthStencilState> g_enc_dss;   // 本编码器上已设的（相同不重设） | Already set on this encoder (not set again if identical)
+ static int g_enc_vis, g_enc_has_vis;   // 本编码器当前的可见性计数模式（0 关 / 槽号 + 1）、是否挂了可见性缓冲 | This encoder's current visibility count mode (0 off / slot number + 1), and whether a visibility buffer is attached
+ static int g_pso_dirty = 1, g_dss_dirty = 1;   // 回放中改了管线 / 深度模板相关状态 | Pipeline / depth-stencil related state was changed during replay
 @@ -4248,6 +4248,10 @@ static void mfx_snapshot_scene(void) {
                  if (pd.stencilAttachment.texture && pd.stencilAttachment.loadAction == MTLLoadActionLoad) pd.stencilAttachment.loadAction = MTLLoadActionDontCare; }
        if (ns) { if (pd.depthAttachment.texture) pd.depthAttachment.storeAction = MTLStoreActionDontCare; if (pd.stencilAttachment.texture) pd.stencilAttachment.storeAction = MTLStoreActionDontCare; } }
@@ -440,3 +449,45 @@ index 2255a5d..4871d79 100644
      return o;
  }
  
+@@ -9163,8 +9176,30 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
+     if (!g_enc) { g_fd_dw = dw; g_fd_di = di; }
+     if (g_enc && g_lay.active && !lay_draw_ok(pr, dw, di)) {   // TOTK: this draw cannot write its layer: end the layered pass, draw in a plain one
+         PD("L %llu 分层通道内的绘制不能写层号，在此切开", g_stat_pass); rp_end(); g_lay.refuse = 1; g_lay.refused++; }
+-    if (!g_mfx.scene_done && g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas && pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key) && mfx_enabled())
+-        mfx_snapshot_scene();   // TOTK_MFX: first UI draw into the canvas: copy the finished scene first
++    /* TOTK_MFX_UIDIAG=1: log the first canvas draws while the scene has not been detected yet, so the UI vertex-shader
++       keys of an area whose UI differs from the known list can be collected and added to mfx_ui_vs(). */
++    { static int uidiag = -1; if (uidiag < 0) { const char *e = getenv("TOTK_MFX_UIDIAG"); uidiag = e && atoi(e); }
++      static int un;
++      if (uidiag && un < 60 && !g_mfx.scene_done && g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas) {
++        un++;
++        MLOG("[mfx][uidiag] F%llu vs %s fs %s depth %d blend %#x nrt %d", (unsigned long long)atomic_load(&g_cur_frame),
++             pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-", R.rt.depth != NULL, S.color.blend_en, R.rt.n);
++      } }
++    /* TOTK_MFX: UI detection by shader key, plus a fallback for areas whose UI vertex shaders are not in the list:
++       after the canvas has been drawn into several times this frame, the first blended draw with depth testing off is
++       taken as the start of the UI (the scene's translucent effects keep depth testing on). TOTK_MFX_UI_FALLBACK=0
++       disables the fallback for comparison. */
++    { static int fb = -1; if (fb < 0) { const char *e = getenv("TOTK_MFX_UI_FALLBACK"); fb = !(e && !strcmp(e, "0")); }
++      int on_canvas = g_mfx.canvas && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_mfx.canvas;
++      if (!g_mfx.scene_done && on_canvas && mfx_enabled()) {
++        int by_key = pr && pr->sh[0] && mfx_ui_vs(pr->sh[0]->key);
++        int by_state = fb && g_mfx.canvas_draws >= 6 && (S.color.blend_en & 1) && !S.ds.dt;
++        if (by_key || by_state) {
++            if (by_state && !by_key) { static int once; if (!once++) MLOG("[mfx] UI fallback: first blended depth-off canvas draw after %u draws (vs %s)", g_mfx.canvas_draws, pr && pr->sh[0] ? pr->sh[0]->key : "-"); }
++            mfx_snapshot_scene();   // TOTK_MFX: first UI draw into the canvas: copy the finished scene first
++        }
++        g_mfx.canvas_draws++;
++      } }
+     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
+     g_fd_dw = NULL; g_fd_di = NULL;
+     if (!en) { g_draw_skip[8]++; return; }
+@@ -11652,7 +11687,7 @@ static int mfx_present_frame_body(const tex_t *t, double period, int discard) {
+             d.storageMode = MTLStorageModeShared; g_mfx_swap_prev = [g_dev newTextureWithDescriptor:d]; }
+         if (sc && g_mfx_swap_prev) { mtl_finish_gpu(); id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder]; [b copyFromTexture:sc toTexture:g_mfx_swap_prev]; [b endEncoding]; cb_commit(cb); cb_wait(cb); }
+     }
+-    g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0;
++    g_mfx.scene_done = g_mfx.ui_cleared = g_mfx.depth_done = g_mfx.want_cam = 0; g_mfx.canvas_draws = 0;
+     if (++g_mfx.frames % 300 == 0) { char b[256]; mfx_stats(b, sizeof b); MLOG("[mfx] 至帧 %llu：%s", (unsigned long long)atomic_load(&g_cur_frame), b); }
+     return slot;
+ }

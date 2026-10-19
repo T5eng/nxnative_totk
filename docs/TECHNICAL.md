@@ -73,6 +73,13 @@ The game's own code executes; nothing is reimplemented. Only the platform below 
   step value from the module data page instead of the nominal `60/FPS` interval. The runtime samples the wall clock on
   every present (mean of the last five deltas, clamped to 1/120…1/15 s) and stores the step in three unit conventions
   (`×30`, `×1`, `×60`) used by different consumers. `TOTK_REALTIME=0` disables the patch, `framestep <ms>` pins the step.
+* **MetalFX interpolation (30 FPS game + one interpolated frame).** The runtime needs, per game frame, the scene colour,
+the UI layer, the G-buffer depth and the camera. Scene completion is normally detected by a fixed list of UI vertex-shader
+key prefixes (`mfx_ui_vs`). Areas that use different UI shaders made detection stop, which is why interpolation only
+covered ~50% of frames in the castle-underground area. `TOTK_MFX_UIDIAG=1` logs the vertex/fragment keys and draw state
+of the canvas draws that fail detection, and a state-based fallback now also accepts "a blended draw with depth testing
+off after the canvas has already been drawn into several times this frame" as the start of the UI
+(`TOTK_MFX_UI_FALLBACK=0` turns it off).
 * **Open issue:** the game keeps a `0.5 / 1.0` half-step selector that it applies after this value, depending on its
   internal 60/30 fps mode bit. Because the runtime feeds a real per-frame delta, the selector makes world time advance at
   `delta × selector` when the game switches modes, so character/animation speed fluctuates with the frame rate. The

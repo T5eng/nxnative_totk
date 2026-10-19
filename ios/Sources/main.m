@@ -12,7 +12,11 @@
 #include "runtime.h"
 #include <fcntl.h>
 
-int totk_loader_main(int argc, char **argv);              // runtime/loader.c compiled with -Dmain=totk_loader_main
+int totk_loader_main(int argc, char **argv);
+
+/* The runtime's 3D brightness hook (weak dm_bright_k in nvn_mtl.m). TOTK_BRIGHT=<k> sets the exposure applied in PQ space
+   before the game's tone-map LUT; TOTK_HDR=1 (prototype) uses a lifted default. 1.0 keeps the original picture. */
+float dm_bright_k(void);              // runtime/loader.c compiled with -Dmain=totk_loader_main
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
 void runtime_front_run(void (*callback)(void));
 
@@ -26,6 +30,17 @@ void runtime_front_run(void (*callback)(void));
 void runtime_shortcut_help_toggle(void) {}
 
 static NSString *g_doc;
+
+float dm_bright_k(void) {
+    static float v = -1;
+    if (v >= 0) return v;
+    const char *e = getenv("TOTK_BRIGHT");
+    if (e && *e) { v = strtof(e, NULL); if (!(v > 0.0f) || v > 8.0f) v = 1.0f; }
+    else if (getenv("TOTK_HDR") && atoi(getenv("TOTK_HDR"))) v = 2.2f;
+    else v = 1.0f;
+    fprintf(stderr, "[totk-ios] 3D brightness exposure %.2f\n", v);
+    return v;
+}
 
 static void ensure_dir(NSString *p) {
     [NSFileManager.defaultManager createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil];
